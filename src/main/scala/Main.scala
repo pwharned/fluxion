@@ -93,7 +93,7 @@ object Main:
     )
 
     // ---------- Training loop ----------
-
+    var start = System.nanoTime()
     for epoch <- 0 until 100 do
       var g0 = 0.0
       var g1 = 0.0
@@ -124,6 +124,30 @@ object Main:
         println(
           f"Epoch $epoch%3d: loss=${computeLoss()}%.4f, accuracy=${accuracy()}%.2f%%"
         )
+    var end = System.nanoTime()
+    val trainTimeSpeed =
+      (end - start) / 1_000_000.0 // nanoseconds to milliseconds
+
+    println(f"Train time: $trainTimeSpeed%.2f ms")
 
     println(f"\nFinal: loss=${computeLoss()}%.4f, accuracy=${accuracy()}%.2f%%")
     println(f"Learned weights: w0=$w0%.4f, w1=$w1%.4f, bias=$bias%.4f")
+
+    println("\n=== Inference Benchmark ===")
+    val nIterations = 10000
+    val testX0 = 5.1
+    val testX1 = 3.5
+
+    // Warmup
+    for _ <- 0 until 100 do sigmoid(w0 * testX0 + w1 * testX1 + bias)
+
+    // Benchmark
+    start = System.nanoTime()
+    for _ <- 0 until nIterations do sigmoid(w0 * testX0 + w1 * testX1 + bias)
+    end = System.nanoTime()
+
+    val inferenceTimeUs = (end - start) / nIterations.toDouble / 1000.0
+    println(f"Average inference time: $inferenceTimeUs%.2f μs per prediction")
+    println(
+      f"Total for $nIterations predictions: ${(end - start) / 1e6}%.2f ms"
+    )
