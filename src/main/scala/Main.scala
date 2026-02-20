@@ -10,6 +10,13 @@ object Main:
     var bias = 0.0
 
     val lr = 0.1
+    println("\n=== Testing AD ===")
+    val testFn = diffFn((x: Double) => x * x) // d/dx(x²) = 2x
+    println(s"d/dx(x²) at x=3: ${testFn(3.0)} (expected: 6.0)")
+
+    val testFn2 = diffFn((x: Double) => 2.0 * x + 5.0) // d/dx(2x+5) = 2
+    println(s"d/dx(2x+5) at x=10: ${testFn2(10.0)} (expected: 2.0)")
+    println()
 
     // ---------- Loss functions: fully expanded, no intermediate vals ----------
 
@@ -95,7 +102,6 @@ object Main:
       for (x, y) <- data do
         val x0 = x(0)
         val x1 = x(1)
-        diffFn((x: Double) => scala.math.exp(x))
 
         // Create gradient functions via compile-time AD
         val g0Fn = diffFn((w: Double) => lossW0(w, w1, bias, x0, x1, y))

@@ -2,6 +2,7 @@ import scala.quoted._
 
 enum Expr:
   case Const(v: Double)
+  case ConstSymbol(name: String)
   case Var(name: String)
   case Add(a: Expr, b: Expr)
   case Sub(a: Expr, b: Expr)
@@ -14,6 +15,7 @@ import Expr.*
 // Pretty-print (for debugging / demo)
 def show(e: Expr): String = e match
   case Const(v)   => v.toString
+  case ConstSymbol(name) => name
   case Var(n)     => n
   case Add(a, b)  => s"(${show(a)} + ${show(b)})"
   case Sub(a, b)  => s"(${show(a)} - ${show(b)})"
@@ -24,6 +26,7 @@ def show(e: Expr): String = e match
 
 def diff(e: Expr, wrt: String): Expr = e match
   case Const(_)   => Const(0.0)
+  case ConstSymbol(name) => Const(0.0)
   case Div(a,b)  => Div(
       Sub(Mul(diff(a, wrt), b), Mul(a, diff(b, wrt))),
       Mul(b, b)
@@ -39,8 +42,7 @@ def diff(e: Expr, wrt: String): Expr = e match
     )
   case Exp(a) =>
     simplify(a) match
-      case Const(0.0) => Const(1.0)  // e^0 = 1
-      case sa => Exp(sa)
+      case sa =>  Mul(Exp(sa), diff(sa, wrt))
 // Optional: tiny simplifier (constant folding + trivial zeros/ones)
 def simplify(e: Expr): Expr = e match
   case Add(Const(0.0), b) => simplify(b)
@@ -78,61 +80,145 @@ def eval(e: Expr, xVal: Double, varName: String = "x"): Double = e match
 // ===== 4. Macros: from Scala function -> Expr -> derivative -> Scala function =====
 
 
-
 inline def diffFn(inline f: Double => Double): Double => Double =
   ${ diffFnImpl('f) }
 
-
 private def diffFnImpl(f: scala.quoted.Expr[Double => Double])(using Quotes): scala.quoted.Expr[Double => Double] =
   import quotes.reflect.*
-  
-  // Extract body and convert to symbolic Expr
-  def toExpr(func: scala.quoted.Expr[Double => Double]): Expr =
-    func match
-      // Base case: identity function is the variable
-      case '{ (x: Double) => x } => 
-        Var("x")
-      case '{ (x: Double) => ($a(x): Double) / ($b(x): Double) } =>
-        Div(toExpr(a), toExpr(b))
-      
-      // exp() function call
-      case '{ (x: Double) => scala.math.exp($a(x)) } =>
-        Exp(toExpr(a))
-      // Addition
-      case '{ (x: Double) => ($a(x): Double) + ($b(x): Double) } =>
-        Add(toExpr(a), toExpr(b))
-      
-      // Subtraction  
-      case '{ (x: Double) => ($a(x): Double) - ($b(x): Double) } =>
-        Sub(toExpr(a), toExpr(b))
-      
-      // Multiplication
-      case '{ (x: Double) => ($a(x): Double) * ($b(x): Double) } =>
-        Mul(toExpr(a), toExpr(b))
-      case '{ (x: Double) => ${scala.quoted.Expr(d: Double)}: Double } =>
-        Const(d)
 
-      case _ =>
-        report.errorAndAbort(
-          s"Unsupported expression\n ${func.show}\n" +
-          s"Only +, -, * and constants are currently supported."
-        )
+  // Map to store captured variable expressions
+  val capturedVars = scala.collection.mutable.Map[String, scala.quoted.Expr[Double]]()
   
-  // Convert symbolic Expr back to function
-  def fromExpr(e: Expr): scala.quoted.Expr[Double => Double] =
+  // Map from proxy names to original variable names
+  val proxyToOriginal = scala.collection.mutable.Map[String, Term]()
+
+  // ---- 1. Extract lambda param + body term ----
+  val (paramSym, bodyTerm): (Symbol, Term) =
+    f.asTerm match
+      case Inlined(_, _, Lambda(List(param:  ValDef), body)) =>
+        (param.symbol, body)
+      case Lambda(List(param: ValDef), body) =>
+        (param.symbol, body)
+      case other =>
+        report.errorAndAbort(s"Expected a simple lambda Double => Double, got: ${other.show}")
+
+  // ---- 2. Extract proxy mappings from Inlined nodes ----
+  def extractProxyMappings(term: Term): Unit =
+    term match
+      case Inlined(_, bindings, expansion) =>
+        // Process the bindings to build proxy → original map
+        bindings.foreach {
+          case ValDef(proxyName, _, Some(rhs)) =>
+            proxyToOriginal(proxyName) = rhs
+          case _ =>
+        }
+        // Recursively process the expansion
+        extractProxyMappings(expansion)
+      case Block(stats, expr) =>
+        stats.foreach {
+          case t: Term => extractProxyMappings(t)
+          case _ => // Other statements (definitions, etc.)
+        }
+      case Apply(fun, args) =>
+        extractProxyMappings(fun)
+        args.foreach(extractProxyMappings)
+      case Select(qual, _) =>
+        extractProxyMappings(qual)
+      case Typed(expr, _) =>
+        extractProxyMappings(expr)
+      case _ => // Leaf nodes, no further traversal
+  
+  // Extract all proxy mappings first
+  extractProxyMappings(bodyTerm)
+
+  // ---- 3. Normalization: strip Inlined / Block / Typed ----
+  def normalize(term: Term): Term = term match
+    case Inlined(_, _, t) =>
+      normalize(t)
+    case Block(stats, expr) =>
+      normalize(expr)
+    case Typed(t, _) =>
+      normalize(t)
+    case other =>
+      other
+
+  // ---- 4. Convert normalized Term -> Expr DSL ----
+  def toExprTerm(term: Term): Expr =
+    normalize(term) match
+      // variable x
+      case id @ Ident(_) if id.symbol == paramSym => Var("x")
+      // numeric literal
+      case Literal(DoubleConstant(v)) =>
+        Const(v)
+
+      // addition
+      case Apply(Select(lhs, op), List(rhs)) if op == "+" =>
+        Add(toExprTerm(lhs), toExprTerm(rhs))
+
+      // subtraction
+      case Apply(Select(lhs, op), List(rhs)) if op == "-" =>
+        Sub(toExprTerm(lhs), toExprTerm(rhs))
+
+      // multiplication
+      case Apply(Select(lhs, op), List(rhs)) if op == "*" =>
+        Mul(toExprTerm(lhs), toExprTerm(rhs))
+
+      // division
+      case Apply(Select(lhs, op), List(rhs)) if op == "/" =>
+        Div(toExprTerm(lhs), toExprTerm(rhs))
+      
+      case Apply(Select(_, "exp"), List(arg)) => Exp(toExprTerm(arg))
+      
+      case Select(arg, "unary_-") => Sub(Const(0.0), toExprTerm(arg))
+      
+      // captured vals / proxies / other idents: treat as constants
+      case id @ Ident(name) =>
+        // Check if this is a proxy variable
+        val actualTerm = proxyToOriginal.get(name) match
+          case Some(original) => original  // Use the original variable
+          case None => id  // Not a proxy, use as-is
+        
+        // Capture the actual variable (not the proxy)
+        capturedVars(name) = actualTerm.asExprOf[Double]
+        ConstSymbol(name)
+
+      case other =>
+        report.errorAndAbort(s"Unsupported term shape:\n${other.show}")
+
+  // ---- 5. Build result function ----
+  def substituteVar(e: Expr): scala.quoted.Expr[Double => Double] =
     e match
-      case Const(v) => 
-        '{ (x: Double) => ${scala.quoted.Expr(v)} }
-      case Var(_) => 
+      case Var(_) =>
         '{ (x: Double) => x }
-      case Add(a, b) => 
-        '{ (x: Double) => ${fromExpr(a)}(x) + ${fromExpr(b)}(x) }
-      case Sub(a, b) => 
-        '{ (x: Double) => ${fromExpr(a)}(x) - ${fromExpr(b)}(x) }
-      case Mul(a, b) => 
-        '{ (x: Double) => ${fromExpr(a)}(x) * ${fromExpr(b)}(x) }
+      case Const(v) =>
+        val vExpr = scala.quoted.Expr(v)
+        '{ (x: Double) => $vExpr }
+      case ConstSymbol(name) =>
+        val captured = capturedVars(name)
+        '{ (x: Double) => $captured }
+      case Add(a, b) =>
+        val fa = substituteVar(a)
+        val fb = substituteVar(b)
+        '{ (x: Double) => $fa(x) + $fb(x) }
+      case Sub(a, b) =>
+        val fa = substituteVar(a)
+        val fb = substituteVar(b)
+        '{ (x: Double) => $fa(x) - $fb(x) }
+      case Mul(a, b) =>
+        val fa = substituteVar(a)
+        val fb = substituteVar(b)
+        '{ (x: Double) => $fa(x) * $fb(x) }
+      case Div(a, b) =>
+        val fa = substituteVar(a)
+        val fb = substituteVar(b)
+        '{ (x: Double) => $fa(x) / $fb(x) }
+      case Exp(a) =>
+        val fa = substituteVar(a)
+        '{ (x: Double) => scala.math.exp($fa(x)) }
+
+  // ---- 6. Pipeline: Term -> Expr -> diff -> simplify -> back to function ----
+  val symbolic: Expr = toExprTerm(bodyTerm)
+  val derivative: Expr = simplify(diff(symbolic, "x"))
   
-  val symbolicExpr = toExpr(f)
-  val derivative = simplify(diff(symbolicExpr, "x"))
-  fromExpr(derivative)
+  substituteVar(derivative)
 
