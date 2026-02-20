@@ -18,9 +18,6 @@ object Main:
     println(s"d/dx(2x+5) at x=10: ${testFn2(10.0)} (expected: 2.0)")
     println()
 
-    // ---------- Loss functions: fully expanded, no intermediate vals ----------
-
-    // Loss w.r.t. w0 (everything else is constant)
     inline def lossW0(
         w0Param: Double,
         w1Const: Double,
@@ -29,7 +26,6 @@ object Main:
         x1: Double,
         y: Double
     ): Double =
-      // Fully expanded: (sigmoid(z) - y)^2
       // sigmoid = 1/(1 + exp(-z)), z = w0*x0 + w1*x1 + bias
       ((1.0 / (1.0 + math.exp(
         -(w0Param * x0 + w1Const * x1 + biasConst)
@@ -126,7 +122,7 @@ object Main:
         )
     var end = System.nanoTime()
     val trainTimeSpeed =
-      (end - start) / 1_000_000.0 // nanoseconds to milliseconds
+      (end - start) / 1_000_000.0
 
     println(f"Train time: $trainTimeSpeed%.2f ms")
 
@@ -138,10 +134,8 @@ object Main:
     val testX0 = 5.1
     val testX1 = 3.5
 
-    // Warmup
     for _ <- 0 until 100 do sigmoid(w0 * testX0 + w1 * testX1 + bias)
 
-    // Benchmark
     start = System.nanoTime()
     for _ <- 0 until nIterations do sigmoid(w0 * testX0 + w1 * testX1 + bias)
     end = System.nanoTime()
