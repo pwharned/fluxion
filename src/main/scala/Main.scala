@@ -1,145 +1,161 @@
 object Main:
-
   def main(args: Array[String]): Unit =
-    println("=== Logistic Regression: Iris (Binary, 2 features) ===\n")
-
-    val data = IrisData.loadFromFile("iris.data")
-
-    var w0 = 0.1
-    var w1 = 0.1
+    println(
+      "=== Logistic Regression: Iris (Binary, 2 features) with Tensors ===\n"
+    )
+    // Load data
+    val rawData = IrisData.loadFromFile("iris.data")
+    // Convert to tensors
+    val features = rawData.map(_._1)
+    val labels = rawData.map(_._2)
+    val X = Tensor.fromArray(features.flatten, Array(features.length, 2))
+    val y = Tensor.fromArray(labels, Array(labels.length))
+    println(s"Loaded ${X.shape(0)} samples with ${X.shape(1)} features")
+    println(s"X shape: [${X.shape.mkString(", ")}]")
+    println(s"y shape: [${y.shape.mkString(", ")}]")
+    // Debug: Check data
+    println(s"\nFirst 5 samples:")
+    for i <- 0 until 5 do
+      val xi = X.row(i)
+      println(f"  x[$i] = [${xi(0)}%.2f, ${xi(1)}%.2f], y[$i] = ${y(i)}%.0f")
+    println(s"\nLabel distribution:")
+    val labels0 = labels.count(_ == 0.0)
+    val labels1 = labels.count(_ == 1.0)
+    println(s"  Class 0: $labels0")
+    println(s"  Class 1: $labels1")
+    // Initialize parameters
+    var weights = Tensor.fromArray(Array(0.1, 0.1))
     var bias = 0.0
-
     val lr = 0.1
-    println("\n=== Testing AD ===")
-    val testFn = diffFn((x: Double) => x * x) // d/dx(x²) = 2x
-    println(s"d/dx(x²) at x=3: ${testFn(3.0)} (expected: 6.0)")
-
-    val testFn2 = diffFn((x: Double) => 2.0 * x + 5.0) // d/dx(2x+5) = 2
-    println(s"d/dx(2x+5) at x=10: ${testFn2(10.0)} (expected: 2.0)")
-    println()
-
-    inline def lossW0(
-        w0Param: Double,
-        w1Const: Double,
-        biasConst: Double,
-        x0: Double,
-        x1: Double,
-        y: Double
-    ): Double =
-      // sigmoid = 1/(1 + exp(-z)), z = w0*x0 + w1*x1 + bias
-      ((1.0 / (1.0 + math.exp(
-        -(w0Param * x0 + w1Const * x1 + biasConst)
-      ))) - y) *
-        ((1.0 / (1.0 + math.exp(
-          -(w0Param * x0 + w1Const * x1 + biasConst)
-        ))) - y)
-
-    inline def lossW1(
-        w1Param: Double,
-        w0Const: Double,
-        biasConst: Double,
-        x0: Double,
-        x1: Double,
-        y: Double
-    ): Double =
-      ((1.0 / (1.0 + math.exp(
-        -(w0Const * x0 + w1Param * x1 + biasConst)
-      ))) - y) *
-        ((1.0 / (1.0 + math.exp(
-          -(w0Const * x0 + w1Param * x1 + biasConst)
-        ))) - y)
-
-    inline def lossBias(
-        biasParam: Double,
-        w0Const: Double,
-        w1Const: Double,
-        x0: Double,
-        x1: Double,
-        y: Double
-    ): Double =
-      ((1.0 / (1.0 + math.exp(
-        -(w0Const * x0 + w1Const * x1 + biasParam)
-      ))) - y) *
-        ((1.0 / (1.0 + math.exp(
-          -(w0Const * x0 + w1Const * x1 + biasParam)
-        ))) - y)
-
-    // ---------- Utility: full loss & accuracy (runtime only) ----------
-
+    val nSamples = X.shape(0)
+    // ========== Helper Functions ==========
     def sigmoid(z: Double): Double = 1.0 / (1.0 + math.exp(-z))
-
+    def forward(): Tensor[Double] =
+      val predictions = Tensor.zeros[Double](Array(nSamples))
+      var i = 0
+      while i < nSamples do
+        val xi = X.row(i)
+        val z = xi.dot(weights) + bias
+        predictions.update(i)(sigmoid(z))
+        i += 1
+      predictions
     def computeLoss(): Double =
-      var sum = 0.0
-      for (x, y) <- data do
-        val pred = sigmoid(w0 * x(0) + w1 * x(1) + bias)
-        val e = pred - y
-        sum += e * e
-      sum / data.length
-
+      val pred = forward()
+      val diff = pred - y
+      (diff.square).mean
     def accuracy(): Double =
+      val pred = forward()
       var correct = 0
-      for (x, y) <- data do
-        val pred =
-          if sigmoid(w0 * x(0) + w1 * x(1) + bias) > 0.5 then 1.0 else 0.0
-        if pred == y then correct += 1
-      correct.toDouble / data.length * 100.0
-
+      var i = 0
+      while i < nSamples do
+        val predicted = if pred(i) > 0.5 then 1.0 else 0.0
+        if predicted == y(i) then correct += 1
+        i += 1
+      correct.toDouble / nSamples * 100.0
+    // Debug: Check initial predictions
+    println(s"\nInitial predictions (first 5):")
+    val initPred = forward()
+    for i <- 0 until 5 do
+      println(f"  pred[$i] = ${initPred(i)}%.4f (expected ${y(i)}%.0f)")
+    println(
+      f"\nInitial weights: [${weights(0)}%.4f, ${weights(1)}%.4f], bias=$bias%.4f"
+    )
     println(
       f"Initial: loss=${computeLoss()}%.4f, accuracy=${accuracy()}%.2f%%\n"
     )
-
-    // ---------- Training loop ----------
+    // ========== Sanity check before training ==========
+    println("=== Sanity check: manual prediction ===")
+    val testX = X.row(0)
+    val testY = y(0)
+    println(f"Sample 0: x=[${testX(0)}%.2f, ${testX(1)}%.2f], y=$testY%.0f")
+    val testZ = testX.dot(weights) + bias
+    val testPred = sigmoid(testZ)
+    println(
+      f"z = ${testX(0)}%.2f * ${weights(0)}%.2f + ${testX(1)}%.2f * ${weights(1)}%.2f + $bias%.2f = $testZ%.4f"
+    )
+    println(f"sigmoid($testZ%.4f) = $testPred%.4f")
+    println(f"error = $testPred%.4f - $testY%.0f = ${testPred - testY}%.4f")
+    println()
+    // ========== Training Loop ==========
     var start = System.nanoTime()
     for epoch <- 0 until 100 do
-      var g0 = 0.0
-      var g1 = 0.0
-      var gb = 0.0
-
-      for (x, y) <- data do
-        val x0 = x(0)
-        val x1 = x(1)
-
-        // Create gradient functions via compile-time AD
-        val g0Fn = diffFn((w: Double) => lossW0(w, w1, bias, x0, x1, y))
-        val g1Fn = diffFn((w: Double) => lossW1(w, w0, bias, x0, x1, y))
-        val gbFn = diffFn((b: Double) => lossBias(b, w0, w1, x0, x1, y))
-
-        g0 += g0Fn(w0)
-        g1 += g1Fn(w1)
-        gb += gbFn(bias)
-
-      g0 /= data.length
-      g1 /= data.length
-      gb /= data.length
-
-      w0 -= lr * g0
-      w1 -= lr * g1
-      bias -= lr * gb
-
+      var gradW = Tensor.zeros[Double](Array(2))
+      var gradB = 0.0
+      // Compute gradients
+      var i = 0
+      while i < nSamples do
+        val xi = X.row(i)
+        val yi = y(i)
+        // Forward pass
+        val z = xi.dot(weights) + bias
+        val pred = sigmoid(z)
+        // Backward pass
+        val error = pred - yi
+        val sigmoidDeriv = pred * (1.0 - pred)
+        val dLossDz = 2.0 * error * sigmoidDeriv
+        // Accumulate gradients
+        var j = 0
+        while j < 2 do
+          gradW.update(j)(gradW(j) + dLossDz * xi(j))
+          j += 1
+        gradB += dLossDz
+        i += 1
+      // Average gradients
+      gradW = gradW / nSamples.toDouble
+      gradB = gradB / nSamples
+      // Debug first epoch
+      if epoch == 0 then
+        println("=== First epoch gradient check ===")
+        println(f"gradW = [${gradW(0)}%.6f, ${gradW(1)}%.6f]")
+        println(f"gradB = $gradB%.6f")
+        println(f"update: weights -= lr * gradW = [${weights(0)}%.4f, ${weights(
+            1
+          )}%.4f] - $lr * [${gradW(0)}%.4f, ${gradW(1)}%.4f]")
+        println()
+      // Update parameters
+      weights = weights - (gradW * lr)
+      bias = bias - (lr * gradB)
+      if epoch == 1 then
+        println(
+          f"After 1 epoch: weights=[${weights(0)}%.4f, ${weights(1)}%.4f], bias=$bias%.4f"
+        )
+        println(f"Loss after 1 epoch: ${computeLoss()}%.4f")
+        println()
       if epoch % 20 == 0 then
         println(
-          f"Epoch $epoch%3d: loss=${computeLoss()}%.4f, accuracy=${accuracy()}%.2f%%"
+          f"Epoch $epoch%3d: loss=${computeLoss()}%.4f, accuracy=${accuracy()}%.2f%%, " +
+            f"w=[${weights(0)}%.4f, ${weights(1)}%.4f], b=$bias%.4f"
         )
     var end = System.nanoTime()
-    val trainTimeSpeed =
-      (end - start) / 1_000_000.0
-
-    println(f"Train time: $trainTimeSpeed%.2f ms")
-
-    println(f"\nFinal: loss=${computeLoss()}%.4f, accuracy=${accuracy()}%.2f%%")
-    println(f"Learned weights: w0=$w0%.4f, w1=$w1%.4f, bias=$bias%.4f")
-
+    val trainTime = (end - start) / 1_000_000.0
+    println(f"\nTrain time: $trainTime%.2f ms")
+    println(f"Final: loss=${computeLoss()}%.4f, accuracy=${accuracy()}%.2f%%")
+    println(
+      f"Learned weights: [${weights(0)}%.4f, ${weights(1)}%.4f], bias=$bias%.4f"
+    )
+    // ========== Final predictions check ==========
+    println(s"\nFinal predictions (first 10):")
+    val finalPred = forward()
+    for i <- 0 until 10 do
+      val pred = finalPred(i)
+      val predClass = if pred > 0.5 then 1.0 else 0.0
+      val correct = if predClass == y(i) then "✓" else "✗"
+      println(
+        f"  pred[$i] = $pred%.4f → class $predClass%.0f (actual ${y(i)}%.0f) $correct"
+      )
+    // ========== Inference Benchmark ==========
     println("\n=== Inference Benchmark ===")
     val nIterations = 10000
-    val testX0 = 5.1
-    val testX1 = 3.5
-
-    for _ <- 0 until 100 do sigmoid(w0 * testX0 + w1 * testX1 + bias)
-
+    val testX2 = Tensor.fromArray(Array(5.1, 3.5))
+    // Warmup
+    for _ <- 0 until 100 do
+      val z = testX2.dot(weights) + bias
+      sigmoid(z)
     start = System.nanoTime()
-    for _ <- 0 until nIterations do sigmoid(w0 * testX0 + w1 * testX1 + bias)
+    for _ <- 0 until nIterations do
+      val z = testX2.dot(weights) + bias
+      sigmoid(z)
     end = System.nanoTime()
-
     val inferenceTimeUs = (end - start) / nIterations.toDouble / 1000.0
     println(f"Average inference time: $inferenceTimeUs%.2f μs per prediction")
     println(
